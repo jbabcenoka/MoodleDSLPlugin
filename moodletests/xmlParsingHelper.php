@@ -10,28 +10,31 @@
             $quizTitle = (string)$quizElement->title[0];
             
             // Get exercises
+            $exercisesWithSubname = array();
+            $exercisesWithTag = array();
+            
             $exercises = $quizElement->exercises;
-            $parsedExercises = array();
-
             foreach($exercises->children() as $withSubnameOrTag) 
             {
-                $parsedExercise = new stdClass();
-                $parsedExercise->count = $withSubnameOrTag->count;
-                
                 if ($withSubnameOrTag->getName() == "withSubname") {
-                    $parsedExercise->subname = $withSubnameOrTag->subname;
+                    $withSubname = new stdClass();
+                    $withSubname->count = $withSubnameOrTag->count;
+                    $withSubname->subname = $withSubnameOrTag->subname;
+                    array_push($exercisesWithSubname, $withSubname);
                 } else if ($withSubnameOrTag->getName() == "withTag") {
-                    $parsedExercise->tag = $withSubnameOrTag->tag;
+                    $withSubname = new stdClass();
+                    $withSubname->count = $withSubnameOrTag->count;
+                    $withSubname->tag = $withSubnameOrTag->tag;
+                    array_push($exercisesWithTag, $withSubname);
                 } else {
                     throw new Exception;
                 }
-
-                array_push($parsedExercises, $parsedExercise);
             }
 
             $parsedQuiz = new stdClass();
             $parsedQuiz->title = $quizTitle;
-            $parsedQuiz->exercises = $parsedExercises;
+            $parsedQuiz->exercisesWithSubname = $exercisesWithSubname;
+            $parsedQuiz->exercisesWithTag = $exercisesWithTag;
             array_push($parsedQuizes, $parsedQuiz);
         }
 
