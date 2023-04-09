@@ -1,12 +1,13 @@
 <?php
+    global $CFG;
 
-use core\update\validator;
-
-    require(__DIR__ . '/../../config.php');
+    require_once(__DIR__ . '/../../config.php');
     require_once($CFG->dirroot.'/course/lib.php');
-    require_once $CFG->libdir.'/formslib.php';
-    require_once $CFG->libdir.'/filelib.php';
+    require_once($CFG->libdir.'/formslib.php');
+    require_once($CFG->libdir.'/filelib.php');
+    require_once($CFG->dirroot.'/mod/quiz/lib.php');
     
+    /*Form definition*/
     class xml_uploading_form extends moodleform {
         protected $messages = array();
 
@@ -16,13 +17,13 @@ use core\update\validator;
             global $USER;
            
             $mform = $this->_form;
-            $options = enrol_get_users_courses($USER->id, true);
+            $courses = enrol_get_users_courses($USER->id, true);
 
-            foreach ($options as $course) {
-                $courseoptions[$course->id] = $course->fullname;
+            foreach ($courses as $course) {
+                $coursesOptions[$course->id] = $course->fullname;
             }
 
-            $mform->addElement('select', 'courseid', 'Select a course', $courseoptions);
+            $mform->addElement('select', 'courseid', 'Select a course', $coursesOptions);
             $mform->addRule('courseid', 'This field is required', 'required', null, 'client');
 
             // Add xml element to form.
@@ -34,7 +35,7 @@ use core\update\validator;
                 array('showremovebutton' => true)
             );
 
-            // Set type of element.
+            // Set type of element
             $mform->setType('xml_file', PARAM_FILE);
             
             // Set file uploading to moodle form
@@ -43,13 +44,8 @@ use core\update\validator;
             $this->add_action_buttons(false, 'Upload file and create quizes');
         }
 
-        public function isValid() {
-            $errors = $this->validation($this->get_data(), array());
-            return empty($errors);
-        }
-
-        public function displayErrors() {
-            $errors = $this->validation($this->get_data(), array());
+        function displayErrors($form) {
+            $errors = $this->validation($form->get_data(), array());
 
             $errorsHtml = '';
             if (!empty($errors)) {
