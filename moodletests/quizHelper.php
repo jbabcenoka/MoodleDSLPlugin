@@ -2,21 +2,8 @@
     require_once($CFG->dirroot.'/lib/questionlib.php');
     require_once($CFG->dirroot.'/course/lib.php');
 
-    function createCourseModule($courseId, $moduleId, $sectionId, $DB) {
-        $cm = new stdClass();
-        $cm->name = 'New exams module';
-        $cm->course = $courseId;
-        $cm->module = $moduleId;
-        $cm->section = $sectionId;
-        $cm->idnumber = null;
-        $cm->added = time();
-        $cm->id	= $DB->insert_record('course_modules', $cm);
-        course_add_cm_to_section($courseId, $cm->id, $sectionId);
-        return $cm;
-    }
-
-    function createQuiz($quiz, $courseId, $moduleId, $sectionId, $title, $DB) {
-        $cm = createCourseModule($courseId, $moduleId, $sectionId, $DB);
+    function create_quiz($quiz, $courseId, $moduleId, $sectionId, $title, $DB) {
+        $cm = create_course_module($courseId, $moduleId, $sectionId, $DB);
         $quiz->name = $title; 
         $quiz->coursemodule = $cm->id;
         $quiz->course = $courseId;
@@ -26,88 +13,125 @@
         $quiz->timeclose = 0;
         $quiz->timelimit = 0;
         $quiz->introformat = 1; //HTML tags
-        $quiz->grade = 10;
         $quiz->questiondecimalpoints = -1;
         $quiz->decimalpoints = 2;
         $quiz->questionsperpage = 1;
         $quiz->preferredbehaviour = 'deferredfeedback';
-        $quizId = quiz_add_instance($quiz);
-
-        return $quizId;
+        return quiz_add_instance($quiz);
+    }
+    
+    function create_course_module($courseId, $moduleId, $sectionId, $DB) {
+        $cm = new stdClass();
+        $cm->name = 'New exams module';
+        $cm->course = $courseId;
+        $cm->module = $moduleId;
+        $cm->section = $sectionId;
+        $cm->idnumber = null;
+        $cm->added = time();
+        $cm->visible = 0;
+        $cm->id	= $DB->insert_record('course_modules', $cm);
+        course_add_cm_to_section($courseId, $cm->id, $sectionId);
+        return $cm;
     }
 
-    function createQuizes($parsedQuizes, $courseId, $DB) {
-        //get quiz module
+    function create_quizes($quizes, $courseId, $context, $DB) {
+        // Get quiz module
         $module = $DB->get_record("modules", array("name" => "quiz"), '*', MUST_EXIST);
-        if (!$module) {
-            return null;
-        }
 
-        //get course first section. if doesn`t exist - create new 
+        // Get course first topic. If doesn`t exist - create new 
         $section = $DB->get_record("course_sections", array("course" => $courseId, "section" => 0),"*", IGNORE_MULTIPLE);
         if (!$section) {
             $section = course_create_section($courseId, 0);
         }
         
-        $contextId = getCourseContextId($courseId);
-        $questionCategories = $DB->get_record_sql(
-            'SELECT id FROM {question_categories} WHERE contextid = ? AND parent > 0', [ $contextId ]
-        );
-        
-        //$questionBankQuestions = getCourseQuestions($contextId, $DB);
-
-        // get quizes with exercises
-        foreach($parsedQuizes as $parsedQuiz) {
-            $quizId = createQuiz($parsedQuiz, $courseId, $module->id, $section->id, $parsedQuiz->title, $DB);
+        $questionCategories = get_course_question_categories($context);
+        foreach($quizes as $quiz) {
+            $questionCategory = get_questions_category_by_substring($questionCategories, $quiz->exercises->questionCategory);
+            if ($questionCategory == null) {
+                throw new Exception("Question category not found. Try to change a question category and upload the file again.");
+            }
+            
+            // Create new quiz
+            $quizId = create_quiz($quiz, $courseId, $module->id, $section->id, $quiz->title, $DB);
             $newQuiz = $DB->get_record('quiz', array('id' => $quizId));
 
-            $questions = array();
-            
-            // Get exercises with subnames
-            foreach ($parsedQuiz->exercisesWithSubname as $exerciseWithSubname) {
-                $questionIds = get_questions_from_categories_and_subname(
-                    (array)$questionCategories, 
-                    $exerciseWithSubname->count->__toString(), 
-                    $exerciseWithSubname->subname->__toString());
-                $questions = array_merge($questions, $questionIds);
-            }
+            // Add questions to quiz
+            $questionsIdsWithSubname = get_execises_with_subname($quiz->exercises->withSubname, $questionCategory);
+            $questionsIdsWithTag = get_exercises_with_tag($quiz->exercises->withTag, $questionCategory);
+            $questions = array_merge($questionsIdsWithSubname, $questionsIdsWithTag);
+            foreach ($questions as $questionId) {
+                quiz_add_quiz_question($questionId, $quiz);
+            };
 
-            // Get exercises with tags
-            foreach ($parsedQuiz->exercisesWithTag as $exerciseWithTag) {
-                $questionIds = get_questions_from_categories_and_tag(
-                    (array)$questionCategories, 
-                    $exerciseWithTag->count->__toString(), 
-                    $exerciseWithTag->tag->__toString());
-                $questions = array_merge($questions, $questionIds);
-            }
-
-            addQuestionsToQuiz($questions, $newQuiz);
+            // Upgrade sumgrades
             quiz_update_sumgrades($newQuiz);
+            
+            // Add users restrictions
+            $restrictions = array();
+            foreach($quiz->quizUsers as $quizUser) {
+                array_push($restrictions, \availability_profile\condition::get_json(
+                    false,
+                    $quizUser->filter,
+                    get_user_field_condition($quizUser->condition),
+                    $quizUser->name));
+            }
+
+            if (!empty($restrictions)){
+                $restriction = \core_availability\tree::get_root_json($restrictions, get_users_separator($quiz->usersSeparator));
+                $DB->set_field(
+                    'course_modules', 
+                    'availability', 
+                    json_encode($restriction), 
+                    ['id' => $quiz->coursemodule]);
+                rebuild_course_cache($courseId, true);
+            }
         }
     }
 
-    function getCourseContextId($courseid) {
-        $context = context_course::instance($courseid);
-        return $context->id;
+    function get_course_question_categories($context) {
+        $contexts = new core_question\local\bank\question_edit_contexts($context);
+        $conArray = $contexts->having_cap('moodle/question:add');
+        return qbank_managecategories\helper::question_category_options($conArray, true, 0, true, -1, false);
+    }
+    
+    function get_questions_category_by_substring($categories, $substring) {
+        $categoryid = null;
+        foreach ($categories[0] as $outerKey => $outerValue) {
+            foreach ($outerValue as $innerKey => $innerValue) {
+                if (strpos($innerValue, $substring) !== false) {
+                    $categoryid = $innerKey;
+                    break 2;
+                }
+            }
+        }
+        
+        return $categoryid;
     }
 
-    function getCourseQuestions($contextId, $DB) {
-        $questionCategories = $DB->get_record_sql(
-            'SELECT TOP 200 id FROM {question_categories} WHERE contextid = ? AND parent > 0',
-            [
-                $contextId
-            ]
-        );
-
-        // Get questions using question categories
-        $questionIds = (array)question_bank::get_finder()->get_questions_from_categories((array)$questionCategories, "");
+    function get_execises_with_subname($exercisesWithSubname, $questionCategory) {
         $questions = array();
+        foreach ($exercisesWithSubname as $exercise) {
+            $questionIds = get_questions_from_categories_and_subname(
+                (array)$questionCategory, 
+                $exercise->count->__toString(), 
+                $exercise->subname->__toString());
+                $questions = array_merge($questions, $questionIds);
+        }
 
-        // Load questions data
-        foreach($questionIds as $questionId) {
-            array_push($questions, question_bank::load_question_data($questionId));
-        };
-
+        return $questions;
+    }
+    
+    function get_exercises_with_tag($exercisesWithTag, $questionCategory) {
+        $questions = array();
+        foreach ($exercisesWithTag as $exercise) {
+            $questionIds = get_questions_from_categories_and_tag(
+                (array)$questionCategory, 
+                $exercise->count->__toString(), 
+                $exercise->tag->__toString());
+                $questions = array_merge($questions, $questionIds);
+        }
+            
+        var_dump($questions);
         return $questions;
     }
 
@@ -127,16 +151,16 @@
                     AND qv.status = :readystatus
                     AND q.name LIKE :subname";
         $retrieved_questions =  $DB->get_records_sql_menu($sql, $qcparams);
-
+        
         $qids = array_keys($retrieved_questions);
         shuffle($qids);
-
+        
         return array_slice($qids, 0, $count);
     }
-
+    
     function get_questions_from_categories_and_tag($categoryids, $count, $tag) {
         global $DB;
-
+        
         list($qcsql, $qcparams) = $DB->get_in_or_equal($categoryids, SQL_PARAMS_NAMED, 'qc');
         $qcparams['readystatus'] = \core_question\local\bank\question_version_status::QUESTION_STATUS_READY;
         $qcparams['questionitemtype'] = 'question';
@@ -159,67 +183,33 @@
         
         $qids = array_keys($retrieved_questions);
         shuffle($qids);
-
+        
         return array_slice($qids, 0, $count);
     }
 
-    function getQuestionsWithSubname($questionCategories, $subname) {
-        // Get questions using question categories
-        $extraconditions = "q.name = :subname";
-        $questionIds = (array)question_bank::get_finder()->get_questions_from_categories((array)$questionCategories, $extraconditions);
-        $questions = array();
-
-        // Load questions data
-        foreach($questionIds as $questionId) {
-            array_push($questions, question_bank::load_question_data($questionId));
-        };
-
-        return $questions;
+    function get_users_separator($separator) {
+        switch ($separator) {
+            case "or":
+                return '|';
+            case "and":
+                return '&';
+            default:
+                throw new Exception("Provided separator doesn`t exist. 
+                    Try to change separator value and upload the file again.");
+        }
     }
 
-    function addParsedQuestions($parsedQuizes, $questionBankQuestions) {
-        $questions = array();
-
-        foreach ($parsedQuizes->exercisesWithSubname as $withSubname)
-        {
-            $retrievedCount = 0;
-            foreach ($questionBankQuestions as $question) {
-                if ($retrievedCount >= $withSubname->count){
-                    break;
-                }
-
-                if (!in_array($question->id, $questions, true) 
-                    && strpos($question->name, $withSubname->substring) !== false){
-                    array_push($res_questions, $question->id);
-                } 
-                
-                $retrievedCount++;
-            }
+    function get_user_field_condition($field) {
+        switch ($field) {
+            case "isequalto":
+                return \availability_profile\condition::OP_IS_EQUAL_TO;
+            case "contains":
+                return \availability_profile\condition::OP_CONTAINS;
+            case "startswith":
+                return \availability_profile\condition::OP_STARTS_WITH;
+            default:
+                throw new Exception("Provided condition doesn`t exist. 
+                    Try to change condition value and upload the file again.");
         }
-        
-        foreach ($parsedQuizes->exercisesWithTag as $withTag)
-        {
-            $retrievedCount = 0;
-            foreach ($questionBankQuestions as $question) {
-                if ($retrievedCount >= $withTag->count){
-                    break;
-                }
-
-                if (!in_array($question->id, $questions, true) 
-                    && strpos($question->name, $withTag->tag) !== false){
-                    array_push($res_questions, $question->id);
-                } 
-                
-                $retrievedCount++;
-            }
-        }
-
-        return $questions;
-    }
-    
-    function addQuestionsToQuiz($questionsIds, $quiz) {
-        foreach ($questionsIds as $questionId) {
-            quiz_add_quiz_question($questionId, $quiz);
-        };
     }
 ?>
