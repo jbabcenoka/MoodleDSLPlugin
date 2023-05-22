@@ -17,7 +17,12 @@
         $quiz->decimalpoints = 2;
         $quiz->questionsperpage = 1;
         $quiz->preferredbehaviour = 'deferredfeedback';
-        return quiz_add_instance($quiz);
+        $quizid = quiz_add_instance($quiz);
+        
+        $quizsection = $DB->get_record('quiz_sections', array('quizid' => $quizid));
+        $quizsection->shufflequestions = $quiz->shufflequestions;
+        $DB->update_record('quiz_sections', $quizsection);
+        return $quizid;
     }
     
     function create_course_module($courseId, $moduleId, $sectionId, $DB) {
@@ -44,48 +49,88 @@
             $section = course_create_section($courseId, 0);
         }
         
+        // Create variants for all quizes
         $questionCategories = get_course_question_categories($context);
-        foreach($quizes as $quiz) {
-            $questionCategory = get_questions_category_by_substring($questionCategories, $quiz->exercises->questionCategory);
+        foreach ($quizes as $quiz) {
+            // Get quiz question category
+            $questionCategory = get_questions_category_by_substring($questionCategories, $quiz->questionCategory);
             if ($questionCategory == null) {
                 throw new Exception("Question category not found. Try to change a question category and upload the file again.");
             }
-            
-            // Create new quiz
-            $quizId = create_quiz($quiz, $courseId, $module->id, $section->id, $quiz->title, $DB);
-            $newQuiz = $DB->get_record('quiz', array('id' => $quizId));
 
-            // Add questions to quiz
-            $questionsIdsWithSubname = get_execises_with_subname($quiz->exercises->withSubname, $questionCategory);
-            $questionsIdsWithTag = get_exercises_with_tag($quiz->exercises->withTag, $questionCategory);
-            $questions = array_merge($questionsIdsWithSubname, $questionsIdsWithTag);
-            foreach ($questions as $questionId) {
-                quiz_add_quiz_question($questionId, $quiz);
-            };
+            // Create quiz variants
+            $variants = array();
+            foreach ($quiz->variants as $quizVariant) {
+                // Create new quiz
+                $quizId = create_quiz($quiz, $courseId, $module->id, $section->id, $quiz->title, $DB);
+                $newQuizVariant = $DB->get_record('quiz', array('id' => $quizId));
+                array_push($variants, $newQuizVariant);
+
+                // Add users restrictions
+                $restrictions = array();
+                foreach($quizVariant->users as $user) {
+                    array_push($restrictions, \availability_profile\condition::get_json(
+                        false,
+                        $user->filter,
+                        get_user_field_condition($user->condition),
+                        $user->name));
+                }
+    
+                if (!empty($restrictions)){
+                    $coursemodule = $DB->get_record('course_modules', array('instance'=>$quizId));
+                    $restriction = \core_availability\tree::get_root_json($restrictions, get_users_separator($quizVariant->usersSeparator));
+                    $DB->set_field(
+                        'course_modules', 
+                        'availability', 
+                        json_encode($restriction), 
+                        ['id' => $coursemodule->id]);
+                    rebuild_course_cache($courseId, true);
+                }
+            }
+
+            // Get exercises
+            foreach ($quiz->exercises as $exercise) {
+                // Get exercises from category that match query
+                $questionIds = get_exercises_from_category($exercise, $questionCategory);
+                // Allocate retrieved exercises into variants
+                if ($questionIds != null) {
+                    $exerciseVariants = AllocateIntoQuizVariants($questionIds, count($quiz->variants), $exercise->count);
+
+                    // Save to variants
+                    $variantIterator = 0;
+                    foreach ($variants as $variant) {
+                        $exercises = $exerciseVariants[$variantIterator];
+                        foreach ($exercises as $exercise) {
+                            quiz_add_quiz_question($exercise, $variant);
+                        }
+                        $variantIterator++;
+                    }
+                }
+            }
 
             // Upgrade sumgrades
-            quiz_update_sumgrades($newQuiz);
-            
-            // Add users restrictions
-            $restrictions = array();
-            foreach($quiz->quizUsers as $quizUser) {
-                array_push($restrictions, \availability_profile\condition::get_json(
-                    false,
-                    $quizUser->filter,
-                    get_user_field_condition($quizUser->condition),
-                    $quizUser->name));
-            }
-
-            if (!empty($restrictions)){
-                $restriction = \core_availability\tree::get_root_json($restrictions, get_users_separator($quiz->usersSeparator));
-                $DB->set_field(
-                    'course_modules', 
-                    'availability', 
-                    json_encode($restriction), 
-                    ['id' => $quiz->coursemodule]);
-                rebuild_course_cache($courseId, true);
+            foreach ($variants as $variant) {
+                quiz_update_sumgrades($variant);
             }
         }
+    }
+
+    function get_exercises_from_category($exercise, $questionCategory) {
+        $questionsIds = array();
+
+        if ($exercise->isWithSubname) {
+            $questionsIds = get_questions_from_categories_and_subname(
+                (array)$questionCategory, 
+                $exercise->subname);
+        }
+        else 
+        {
+            $questionsIds = get_questions_from_categories_and_tag(
+                (array)$questionCategory, 
+                $exercise->tag);
+        }
+
+        return $questionsIds;
     }
 
     function get_course_question_categories($context) {
@@ -108,34 +153,7 @@
         return $categoryid;
     }
 
-    function get_execises_with_subname($exercisesWithSubname, $questionCategory) {
-        $questions = array();
-        foreach ($exercisesWithSubname as $exercise) {
-            $questionIds = get_questions_from_categories_and_subname(
-                (array)$questionCategory, 
-                $exercise->count->__toString(), 
-                $exercise->subname->__toString());
-                $questions = array_merge($questions, $questionIds);
-        }
-
-        return $questions;
-    }
-    
-    function get_exercises_with_tag($exercisesWithTag, $questionCategory) {
-        $questions = array();
-        foreach ($exercisesWithTag as $exercise) {
-            $questionIds = get_questions_from_categories_and_tag(
-                (array)$questionCategory, 
-                $exercise->count->__toString(), 
-                $exercise->tag->__toString());
-                $questions = array_merge($questions, $questionIds);
-        }
-            
-        var_dump($questions);
-        return $questions;
-    }
-
-    function get_questions_from_categories_and_subname($categoryids, $count, $subname) {
+    function get_questions_from_categories_and_subname($categoryids, $subname) {
         global $DB;
 
         list($qcsql, $qcparams) = $DB->get_in_or_equal($categoryids, SQL_PARAMS_NAMED, 'qc');
@@ -152,13 +170,10 @@
                     AND q.name LIKE :subname";
         $retrieved_questions =  $DB->get_records_sql_menu($sql, $qcparams);
         
-        $qids = array_keys($retrieved_questions);
-        shuffle($qids);
-        
-        return array_slice($qids, 0, $count);
+        return array_keys($retrieved_questions);        
     }
     
-    function get_questions_from_categories_and_tag($categoryids, $count, $tag) {
+    function get_questions_from_categories_and_tag($categoryids, $tag) {
         global $DB;
         
         list($qcsql, $qcparams) = $DB->get_in_or_equal($categoryids, SQL_PARAMS_NAMED, 'qc');
@@ -181,11 +196,49 @@
                                         AND ti.tagid = :tag)";
         $retrieved_questions =  $DB->get_records_sql_menu($sql, $qcparams);
         
-        $qids = array_keys($retrieved_questions);
-        shuffle($qids);
-        
-        return array_slice($qids, 0, $count);
+        return array_keys($retrieved_questions);
     }
+
+    function AllocateIntoQuizVariants($exercisesIds, $variantCount, $count) {
+        $result = array();
+        shuffle($exercisesIds);
+
+        $startpos = 0;
+        for ($i = 0; $i < $variantCount; $i++) {
+            $variantExercises = array_slice($exercisesIds, $startpos, $count);
+
+            if (count($variantExercises) == $count) {
+                $startpos = $startpos + $count;
+                array_push($result, $variantExercises);
+                continue;
+            }
+            
+            while (count($variantExercises) < $count) {
+                $exercisesWithoutPart = array_slice($exercisesIds, 0, $startpos);
+
+                $variantExercisesCount = $count - count($variantExercises);
+                if (count($exercisesWithoutPart) > 0) {
+                    shuffle($exercisesWithoutPart);
+                    $exercisesPart = array_slice($exercisesWithoutPart, 0, $variantExercisesCount);
+                }
+                else {
+                    $exercisesPart = array_slice($exercisesIds, 0, $variantExercisesCount);
+                }
+
+                foreach ($exercisesPart as $ex) {
+                    array_push($variantExercises, $ex);
+                }
+
+                shuffle($exercisesIds);
+            }
+            
+            $startpos = 0;
+            array_push($result, $variantExercises);
+        }
+
+        return $result;
+    }
+
 
     function get_users_separator($separator) {
         switch ($separator) {

@@ -39,6 +39,7 @@ use core\output\notification;
         try
         {
             $quizes = $form->parse($xml);
+            var_dump($quizes);
             if (empty($quizes)) {
                 $msg = 'XML file does not contain any quizes. Try to generate XML file again.';
                 redirect($redirect, $msg, null, notification::NOTIFY_ERROR);

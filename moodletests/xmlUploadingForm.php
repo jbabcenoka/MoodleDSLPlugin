@@ -62,43 +62,51 @@
             {
                 $quiz = new stdClass();
                 $quiz->title = (string)$quizElement->title[0];
-                
-                // Get exercises
-                $quiz->exercises = new stdClass();
-                $quiz->exercises->questionCategory = (string)$quizElement->exercises->questionCategory[0];
-                
-                $quiz->exercises->withSubname = array();
-                foreach($quizElement->exercises->withSubname as $exercise) 
-                {
-                    $withSubname = new stdClass();
-                    $withSubname->count = $exercise->count;
-                    $withSubname->subname = $exercise->subname;
-                    array_push($quiz->exercises->withSubname, $withSubname);
-                }
-                
-                $quiz->exercises->withTag = array();
-                foreach($quizElement->exercises->withTag as $exercise) {
-                    $withTag = new stdClass();
-                    $withTag->count = $exercise->count;
-                    $withTag->tag = $exercise->tag;
-                    array_push($quiz->exercises->withTag, $withTag);
+
+                // Get variants
+                $quiz->variants = array();
+                foreach ($quizElement->quizVariant as $variant) {
+                    // Get users
+                    $newVariant = new stdClass();
+                    $newVariant->usersSeparator = (string)$variant['usersSeparator'];
+                    $newVariant->users = array();
+                    foreach($variant->user as $user)
+                    {
+                        $newUser = new stdClass();
+                        $newUser->filter = (string)$user->searchField[0];
+                        $newUser->condition = (string)$user->condition[0];
+                        $newUser->name = (string)$user->name[0];
+                        array_push($newVariant->users, $newUser);
+                    }
+
+                    array_push($quiz->variants, $newVariant);
                 }
 
-                // Get users
-                $quiz->usersSeparator = (string)$quizElement->quizUsers['separator'];
-                $quiz->quizUsers = array();
-                foreach($quizElement->quizUsers->quizUser as $quizUser)
+                $quiz->questionCategory = (string)$quizElement->exercises->questionCategory[0];
+                
+                // Get exercises
+                $quiz->exercises = array();
+                foreach($quizElement->exercises->withSubname as $exercise) {
+                    $newExercise = new stdClass();
+                    $newExercise->isWithSubname = true;
+                    $newExercise->count = (int)$exercise->count;
+                    $newExercise->subname = (string)$exercise->subname[0];
+                    array_push($quiz->exercises, $newExercise);
+                }
+
+                foreach($quizElement->exercises->withTag as $exercise) 
                 {
-                    $user = new stdClass();
-                    $user->filter = (string)$quizUser->searchField[0];
-                    $user->condition = (string)$quizUser->condition[0];
-                    $user->name = (string)$quizUser->name[0];
-                    array_push($quiz->quizUsers, $user);
+                    $newExercise = new stdClass();
+                    $newExercise->count = $exercise->count;
+                    $newExercise->isWithSubname = false;
+                    $newExercise->count = (int)$exercise->count;
+                    $newExercise->tag = (string)$exercise->tag[0];
+                    array_push($quiz->exercises, $newExercise);
                 }
 
                 // Get settings
                 $settings = $quizElement->settings;
-                $quiz->shuffleanswers = ((string)$settings->shuffle[0] == "true") ? 1 : 0;
+                $quiz->shufflequestions = ((string)$settings->shuffle[0] == "true") ? 1 : 0;
                 $quiz->attempts = ((string)$settings->attempts[0] == "unlimited") ? 0 : (string)$settings->attempts[0];
                 $quiz->grade = (string)$settings->passgrade[0];
                 array_push($quizes, $quiz);
